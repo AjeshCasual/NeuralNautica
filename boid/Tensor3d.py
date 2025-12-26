@@ -34,7 +34,7 @@ WIDTH = 1000
 HEIGHT = 1000
 DEPTH = 1000
 
-N = 500
+N = 5000
 
 DEVICE = "cuda"
 
@@ -157,10 +157,10 @@ def alignment(
     Args:
         pos (torch.Tensor): Tensor of shape (N, 3) representing boid positions.
         vel (torch.Tensor): Tensor of shape (N, 3) representing boid velocities.
-        perception_radius (float, optional): Distance within which neighbors are considered for alignment.
-            Defaults to A_RADIUS.
-        alignment_strength (float, optional): Weight factor controlling how strongly boids steer toward the average neighbor velocity.
-            Defaults to A_STRENGTH.
+        perception_radius (float, optional): Distance within which neighbors are considered
+            for alignment. Defaults to A_RADIUS.
+        alignment_strength (float, optional): Weight factor controlling how strongly boids
+            steer toward the average neighbor velocity. Defaults to A_STRENGTH.
         speed (float, optional): Target constant speed for all boids after normalization.
             Defaults to SPEED.
 
@@ -203,11 +203,9 @@ def step(pos, vel, dt=DT):
             pos (torch.Tensor): Updated positions of shape (N, 3).
             vel (torch.Tensor): Updated velocities of shape (N, 3).
     """
-    vel = alignment(
-        pos, vel, perception_radius=50.0, alignment_strength=0.05, speed=2.0
-    )
-    vel = cohesion(pos, vel, perception_radius=50.0, cohesion_strength=0.01, speed=2.0)
-    vel = separation(pos, vel, min_distance=20.0, separation_strength=0.05, speed=2.0)
+    vel = alignment(pos, vel)
+    vel = cohesion(pos, vel)
+    vel = separation(pos, vel)
 
     pos = pos + vel * dt
 
