@@ -1,139 +1,97 @@
+import numpy as np
+import open3d as o3d
 import torch
 
 
-def perlin_noise_3d_torch(
-    size, scale=32.0, octaves=1, persistence=0.5, lacunarity=2.0, seed=0, device="cuda"
-):
-    """
-    Generate 3D Perlin noise as a torch.Tensor of shape (D, H, W).
-    - size: (D, H, W) tuple
-    - scale: base frequency denominator; larger => smoother
-    - octaves: number of layers to sum
-    - persistence: amplitude multiplier per octave
-    - lacunarity: frequency multiplier per octave
-    - seed: random seed for permutation table
-    """
-    D, H, W = size
-    torch.manual_seed(seed)
-    device = torch.device(device)
+# --- Perlin Noise 3D ---
+def perlin_3d(shape=(64, 64, 64), res=(8, 8, 8)):
+    """Generate 3D Perlin noise using PyTorch tensors."""
 
-    # Permutation table (repeat to avoid modulus)
-    p = torch.randperm(256, device=device)
-    perm = torch.cat([p, p])
+    def f(t):
+        return 6 * t**5 - 15 * t**4 + 10 * t**3
 
-    # Gradient directions for 3D (12 canonical directions)
-    grads = torch.tensor(
-        [
-            [1, 1, 0],
-            [-1, 1, 0],
-            [1, -1, 0],
-            [-1, -1, 0],
-            [1, 0, 1],
-            [-1, 0, 1],
-            [1, 0, -1],
-            [-1, 0, -1],
-            [0, 1, 1],
-            [0, -1, 1],
-            [0, 1, -1],
-            [0, -1, -1],
-        ],
-        dtype=torch.float32,
-        device=device,
+    delta = (res[0] / shape[0], res[1] / shape[1], res[2] / shape[2])
+    d = (shape[0] // res[0], shape[1] // res[1], shape[2] // res[2])
+    grid = torch.stack(
+        torch.meshgrid(
+            torch.arange(0, res[0] + 1, dtype=torch.float32),
+            torch.arange(0, res[1] + 1, dtype=torch.float32),
+            torch.arange(0, res[2] + 1, dtype=torch.float32),
+            indexing="ij",
+        ),
+        dim=-1,
     )
 
-    def fade(t):
-        return t * t * t * (t * (t * 6 - 15) + 10)
+    # Random gradients
+    gradients = torch.randn(res[0] + 1, res[1] + 1, res[2] + 1, 3)
+    gradients = gradients / torch.norm(gradients, dim=-1, keepdim=True)
 
-    def lerp(a, b, t):
-        return a + t * (b - a)
+    # Coordinates
+    lin = [torch.linspace(0, res[i], shape[i], dtype=torch.float32) for i in range(3)]
+    coords = torch.stack(torch.meshgrid(*lin, indexing="ij"), dim=-1)
+    g000 = gradients[
+        coords[..., 0].long(), coords[..., 1].long(), coords[..., 2].long()
+    ]
 
-    def noise_single(freq):
-        # Grid coordinates
-        z = torch.linspace(0, D, D, device=device) / scale * freq
-        y = torch.linspace(0, H, H, device=device) / scale * freq
-        x = torch.linspace(0, W, W, device=device) / scale * freq
+    # Fractional part
+    frac = coords - coords.floor()
+    u, v, w = f(frac[..., 0]), f(frac[..., 1]), f(frac[..., 2])
 
-        Z, Y, X = torch.meshgrid(z, y, x, indexing="ij")
+    # Dot products with gradient vectors
+    def dot_grid(ix, iy, iz, fx, fy, fz):
+        g = gradients[ix, iy, iz]
+        return fx * g[..., 0] + fy * g[..., 1] + fz * g[..., 2]
 
-        # Unit cube
-        X0 = torch.floor(X).to(torch.int32) & 255
-        Y0 = torch.floor(Y).to(torch.int32) & 255
-        Z0 = torch.floor(Z).to(torch.int32) & 255
+    x0 = coords[..., 0].long()
+    y0 = coords[..., 1].long()
+    z0 = coords[..., 2].long()
 
-        # Local position in cube
-        xf = X - torch.floor(X)
-        yf = Y - torch.floor(Y)
-        zf = Z - torch.floor(Z)
+    x1 = torch.clamp(x0 + 1, max=res[0])
+    y1 = torch.clamp(y0 + 1, max=res[1])
+    z1 = torch.clamp(z0 + 1, max=res[2])
 
-        u = fade(xf)
-        v = fade(yf)
-        w = fade(zf)
+    n000 = dot_grid(x0, y0, z0, frac[..., 0], frac[..., 1], frac[..., 2])
+    n100 = dot_grid(x1, y0, z0, frac[..., 0] - 1, frac[..., 1], frac[..., 2])
+    n010 = dot_grid(x0, y1, z0, frac[..., 0], frac[..., 1] - 1, frac[..., 2])
+    n110 = dot_grid(x1, y1, z0, frac[..., 0] - 1, frac[..., 1] - 1, frac[..., 2])
+    n001 = dot_grid(x0, y0, z1, frac[..., 0], frac[..., 1], frac[..., 2] - 1)
+    n101 = dot_grid(x1, y0, z1, frac[..., 0] - 1, frac[..., 1], frac[..., 2] - 1)
+    n011 = dot_grid(x0, y1, z1, frac[..., 0], frac[..., 1] - 1, frac[..., 2] - 1)
+    n111 = dot_grid(x1, y1, z1, frac[..., 0] - 1, frac[..., 1] - 1, frac[..., 2] - 1)
 
-        # Hash function to pick gradient indices
-        def hash(ix, iy, iz):
-            return perm[perm[perm[ix] + iy] + iz] % 12
+    # Interpolation
+    nx00 = n000 * (1 - u) + n100 * u
+    nx10 = n010 * (1 - u) + n110 * u
+    nx01 = n001 * (1 - u) + n101 * u
+    nx11 = n011 * (1 - u) + n111 * u
 
-        # Corner hashes
-        g000 = grads[hash(X0, Y0, Z0)]
-        g001 = grads[hash(X0, Y0, (Z0 + 1) & 255)]
-        g010 = grads[hash(X0, (Y0 + 1) & 255, Z0)]
-        g011 = grads[hash(X0, (Y0 + 1) & 255, (Z0 + 1) & 255)]
-        g100 = grads[hash((X0 + 1) & 255, Y0, Z0)]
-        g101 = grads[hash((X0 + 1) & 255, Y0, (Z0 + 1) & 255)]
-        g110 = grads[hash((X0 + 1) & 255, (Y0 + 1) & 255, Z0)]
-        g111 = grads[hash((X0 + 1) & 255, (Y0 + 1) & 255, (Z0 + 1) & 255)]
+    nxy0 = nx00 * (1 - v) + nx10 * v
+    nxy1 = nx01 * (1 - v) + nx11 * v
 
-        # Vectors from corners to point
-        x0, y0, z0 = xf, yf, zf
-        x1, y1, z1 = xf - 1, yf - 1, zf - 1
-
-        # Dot products
-        n000 = g000[..., 0] * x0 + g000[..., 1] * y0 + g000[..., 2] * z0
-        n001 = g001[..., 0] * x0 + g001[..., 1] * y0 + g001[..., 2] * z1
-        n010 = g010[..., 0] * x0 + g010[..., 1] * y1 + g010[..., 2] * z0
-        n011 = g011[..., 0] * x0 + g011[..., 1] * y1 + g011[..., 2] * z1
-        n100 = g100[..., 0] * x1 + g100[..., 1] * y0 + g100[..., 2] * z0
-        n101 = g101[..., 0] * x1 + g101[..., 1] * y0 + g101[..., 2] * z1
-        n110 = g110[..., 0] * x1 + g110[..., 1] * y1 + g110[..., 2] * z0
-        n111 = g111[..., 0] * x1 + g111[..., 1] * y1 + g111[..., 2] * z1
-
-        # Trilinear interpolation with fade
-        nx00 = lerp(n000, n100, u)
-        nx01 = lerp(n001, n101, u)
-        nx10 = lerp(n010, n110, u)
-        nx11 = lerp(n011, n111, u)
-
-        nxy0 = lerp(nx00, nx10, v)
-        nxy1 = lerp(nx01, nx11, v)
-
-        nxyz = lerp(nxy0, nxy1, w)
-
-        return nxyz  # roughly in [-1, 1]
-
-    noise = torch.zeros((D, H, W), dtype=torch.float32, device=device)
-    amplitude = 1.0
-    frequency = 1.0
-    max_amp = 0.0
-
-    for _ in range(octaves):
-        noise += amplitude * noise_single(frequency)
-        max_amp += amplitude
-        amplitude *= persistence
-        frequency *= lacunarity
-
-    noise /= max_amp  # normalize to [-1, 1] range-ish
-    return noise
+    nxyz = nxy0 * (1 - w) + nxy1 * w
+    return nxyz
 
 
-# Example
-if __name__ == "__main__":
-    vol = perlin_noise_3d_torch(
-        size=(64, 64, 64),
-        scale=32.0,
-        octaves=4,
-        persistence=0.5,
-        lacunarity=2.0,
-        seed=42,
-        device="cuda",
-    )
-    print(vol)
+# --- Generate Perlin Noise Volume ---
+shape = (64, 64, 64)
+noise = perlin_3d(shape, res=(8, 8, 8))
+
+# Normalize to [0,1]
+volume = (noise - noise.min()) / (noise.max() - noise.min())
+volume_np = volume.numpy()
+
+# --- Visualize with Open3D ---
+# Convert to voxel grid (threshold at 0.5)
+voxels = []
+for x in range(shape[0]):
+    for y in range(shape[1]):
+        for z in range(shape[2]):
+            if volume_np[x, y, z] > 0.5:
+                voxels.append([x, y, z])
+
+# Create voxel grid
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(np.array(voxels))
+
+# Visualize
+o3d.visualization.draw_geometries([pcd])
