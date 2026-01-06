@@ -49,7 +49,7 @@ C_STRENGTH = 0.01
 A_STRENGTH = 0.05
 
 DT = 1
-STEPS = 5000
+STEPS = 5000000
 
 
 def generate_boids(n=N, speed=SPEED, device=DEVICE):
