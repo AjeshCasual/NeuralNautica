@@ -97,7 +97,7 @@ def run_simulation(pos, vel, steps=STEPS):
     vis.add_geometry(pcd)
 
     for _ in range(steps):
-        pos, vel = step(pos, vel, dt=DT)
+        pos, vel, gen, rays, ray_intense = step(pos, vel, dt=DT)
         pcd.points = o3d.utility.Vector3dVector(pos.detach().cpu().numpy())
         vis.update_geometry(pcd)
         vis.poll_events()
