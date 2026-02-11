@@ -1,40 +1,35 @@
 import torch
 from rules import *
 from var import WIDTH, HEIGHT, DEPTH, DT
+import avoid
+import sys, os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from terrain.perlin_cuda import generate_batched_noise_grids
 
 def step(pos, vel, dt=DT):
-    """
-    Advances the boid simulation by one time step.
-    This function applies the three flocking rules (alignment, cohesion, separation) to update boid velocities, then moves boids forward in time by `dt`. It also enforces boundary conditions by bouncing boids off the walls of the simulation box when they reach or exceed the limits.
-    Args:
-        pos (torch.Tensor): Tensor of shape (N, 3) representing boid positions.
-        vel (torch.Tensor): Tensor of shape (N, 3) representing boid velocities.
-        dt (float, optional): Time step for position updates. Defaults to DT.
-
-    Returns:
-        tuple:
-            pos (torch.Tensor): Updated positions of shape (N, 3).
-            vel (torch.Tensor): Updated velocities of shape (N, 3).
-    """
+    # 1. Social Steering (The Flocking Rules)
     vel = alignment(pos, vel)
     vel = cohesion(pos, vel)
     vel = separation(pos, vel)
 
+    # 2. Perception Setup
+    # radius=5 or 6 gives the bots a "vision bubble"
+    # scale=0.1 determines how "stretched" the terrain is
+    view_dist = 6
+
+    # Passing 42 directly works because your function expands it!
+    # Using the same number for all ensures they share the same world.
+    gen = generate_batched_noise_grids(pos, rng_seeds=42, radius=view_dist, scale=0.1)
+
+    # 3. Terrain Avoidance
+    # n_rays: more rays = smoother detection but higher GPU cost
+    # threshold: what density they consider "solid" (0.1 - 0.3 is typical)
+    vel, rays, ray_intense = avoid.avoid_terrain_with_viz(
+        pos, vel, gen, radius=view_dist, n_rays=15, threshold=0.15
+    )
+
+    # 4. Movement
     pos = pos + vel * dt
 
-    mask_x_low = pos[:, 0] < 0
-    mask_x_high = pos[:, 0] > WIDTH
-    vel[mask_x_low | mask_x_high, 0] *= -1
-    pos[:, 0] = pos[:, 0].clamp(0, WIDTH)
-
-    mask_y_low = pos[:, 1] < 0
-    mask_y_high = pos[:, 1] > HEIGHT
-    vel[mask_y_low | mask_y_high, 1] *= -1
-    pos[:, 1] = pos[:, 1].clamp(0, HEIGHT)
-
-    mask_z_low = pos[:, 2] < 0
-    mask_z_high = pos[:, 2] > DEPTH
-    vel[mask_z_low | mask_z_high, 2] *= -1
-    pos[:, 2] = pos[:, 2].clamp(0, DEPTH)
-
-    return pos, vel
+    return pos, vel, gen, rays, ray_intense

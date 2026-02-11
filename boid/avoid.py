@@ -1,52 +1,70 @@
 import torch
+import torch.nn.functional as F
 
-def get_updated_boid_velocities(positions, velocities, noise_grids, n_rays=100, angle_deg=45, level=0.0, max_dist=5.0):
-    """
-    Inputs:
-        positions: (N, 3) current positions
-        velocities: (N, 3) current velocities
-        noise_grids: (N, D, D, D) the grids from function above
-    Returns:
-        updated_vel: (N, 3) the new velocity steered away from obstacles
-    """
+def avoid_terrain_with_viz(positions, velocities, noise_grids, radius, n_rays=100, angle_deg=45, threshold=0.1):
     N = positions.shape[0]
     device = positions.device
+    D = noise_grids.shape[1]
+    center_idx = radius
 
-    # 1. Generate & Rotate Fibonacci Rays (N, M, 3)
-    # This ensures sensors point where the player is moving
-    ray_dirs = _get_batched_fibonacci_rays(velocities, n_rays, angle_deg, device)
+    # 1. Generate Fibonacci Cone (Local Space)
+    indices = torch.arange(n_rays, device=device)
+    phi = (1 + 5**0.5) / 2
+    cos_theta_max = torch.cos(torch.tensor(angle_deg * (3.14159 / 180.0)))
 
-    # 2. Define Weights (Center rays are 1.0, peripheral are 0.2)
-    weights = torch.linspace(1.0, 0.2, n_rays, device=device).view(1, -1, 1)
+    z = 1.0 - (indices / float(n_rays - 1)) * (1.0 - cos_theta_max)
+    radius_at_z = torch.sqrt(1.0 - z*z)
+    theta = 2 * 3.14159 * indices / phi
+    local_rays = torch.stack([radius_at_z * torch.cos(theta), radius_at_z * torch.sin(theta), z], dim=-1)
 
-    # 3. Sample the "Mathematical Mesh" along rays
-    num_steps = 10
-    distances = torch.linspace(0.5, max_dist, num_steps, device=device)
-    total_avoidance_force = torch.zeros((N, 3), device=device)
+    # 2. Rotate Rays to align with Velocity
+    # We find the rotation from +Z (0,0,1) to the velocity vector
+    # Ensure forward is (N, 3)
+    forward = F.normalize(velocities, dim=-1)
 
-    for d in distances:
-        # Calculate sample points in local grid UV space [-1, 1]
-        # (N, M, 3)
-        sample_dirs = ray_dirs * d
-        grid_uv = sample_dirs / max_dist # Normalize to detection radius
+    # 1. Create a stable 'up' vector (N, 3)
+    # Force the dtype to be float32 at the start
+    up = torch.tensor([0.0, 1.0, 0.0], device=device).expand(N, 3).clone()
 
-        # Grid Sample: Samples the (N, D, D, D) noise at the ray points
-        sampled_noise = torch.nn.functional.grid_sample(
-            noise_grids.unsqueeze(1),
-            grid_uv.unsqueeze(2).unsqueeze(2),
-            mode='bilinear', align_corners=True
-        ).reshape(N, n_rays)
+    # This will now work because both sides are floats
+    is_vertical = torch.abs(forward[:, 1]) > 0.99
+    up[is_vertical] = torch.tensor([1.0, 0.0, 0.0], device=device)
 
-        # Collision Check: Is the noise value above the "Marching Cubes" level?
-        hits = (sampled_noise > level).float().unsqueeze(-1) # (N, M, 1)
+    # 3. Calculate Right and True Up
+    # Use .contiguous() to ensure memory is packed correctly for the cross product
+    right = F.normalize(torch.cross(up, forward, dim=-1), dim=-1)
+    true_up = torch.cross(forward, right, dim=-1)
 
-        # Add repulsion: Push away from the ray direction
-        # Urgency is 1/d (closer obstacles = harder turn)
-        total_avoidance_force += (ray_dirs * -1.0) * hits * weights * (1.0 / d)
+    # 4. Rotation Matrix [Right | True_Up | Forward]
+    # Shape: (N, 3, 3)
+    rot_matrix = torch.stack([right, true_up, forward], dim=-1)
 
-    # 4. Integrate with current velocity
-    # We add the avoidance force to the original velocity
-    # You can multiply avoidance_force by a 'sensitivity' constant here
-    updated_vel = velocities + total_avoidance_force
+    # Transform local rays to world rays: (N, n_rays, 3)
+    world_rays = torch.bmm(local_rays.expand(N, n_rays, 3), rot_matrix.transpose(-2, -1))
 
-    return updated_vel
+    # 3. Ray Marching & Weighting
+    steps = torch.linspace(0.2, 1.0, steps=5, device=device) * radius
+    repulsion_vec = torch.zeros((N, 3), device=device)
+
+    # Track which rays hit terrain for visualization (optional)
+    ray_intensities = torch.zeros((N, n_rays), device=device)
+
+    for step in steps:
+        grid_pos = (world_rays * step) + center_idx
+        grid_pos = grid_pos.long().clamp(0, D - 1)
+
+        n_idx = torch.arange(N, device=device).view(N, 1)
+        sampled_noise = noise_grids[n_idx, grid_pos[..., 0], grid_pos[..., 1], grid_pos[..., 2]]
+
+        intensity = F.relu(sampled_noise - threshold)
+        weight = intensity / (step ** 2)
+
+        repulsion_vec -= (weight.unsqueeze(-1) * world_rays).sum(dim=1)
+        ray_intensities += intensity # For viz: which rays are "red"
+
+    # 4. Final Velocity
+    avoidance_strength = 0.8
+    final_vel = velocities + (repulsion_vec * avoidance_strength)
+    speed = velocities.norm(dim=-1, keepdim=True)
+
+    return F.normalize(final_vel, dim=-1) * speed, world_rays, ray_intensities
