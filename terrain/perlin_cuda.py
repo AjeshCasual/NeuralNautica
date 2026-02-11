@@ -20,7 +20,11 @@ def generate_batched_noise_grids(positions, rng_seeds, radius, scale=0.1, device
     # 2. Shift and Scale to World Noise Space
     # We expand coords to (N, D, D, D, 3) and add player positions
     start_offsets = (positions - radius).view(N, 1, 1, 1, 3)
-    # Add the unique RNG seed per player to ensure they aren't all in the same noise
+    # Add the unique RNG seed per player to ensure they aren't all in the same noise# Ensure rng_seeds is a tensor on the correct device
+    if not isinstance(rng_seeds, torch.Tensor):
+        rng_seeds = torch.tensor(rng_seeds, device=device).expand(N)
+
+    # Now .view(N, 1, 1, 1, 1) will work
     world_coords = (coords.unsqueeze(0) + start_offsets + rng_seeds.view(N, 1, 1, 1, 1)) * scale
 
     # 3. Compute Perlin Noise (using the vectorized function from earlier)
